@@ -102,6 +102,10 @@ def zone_intensity_duration(zone_minutes: dict[str, float], vo2_factors: dict[st
     return intensity, duration
 
 
+# associated_device_name -> device; "NoneType" (no wearable worn) maps to None.
+_DEVICE_NAMES = {"FitbitFile": "fitbit", "GarminFile": "garmin"}
+
+
 def _load_session_errors_for_user(user_dir: Path) -> list[dict]:
     user_json = user_dir / "user.json"
     records_dir = user_dir / "reports" / "sessions" / "records"
@@ -123,7 +127,7 @@ def _load_session_errors_for_user(user_dir: Path) -> list[dict]:
         if not assoc.get("heart_rate_times"):
             continue  # no device worn during this session
 
-        device = "fitbit" if data.get("associated_fitbit") else "garmin" if data.get("associated_garmin") else None
+        device = _DEVICE_NAMES.get(data.get("associated_device_name"))
         if device is None:
             continue
 

@@ -3,21 +3,26 @@ version: "3"
 vars:
   IMAGE: wearable-risk-pipeline
   CONTAINER: wearable-risk-pipeline
-  # Placeholder -- replace with the real location of the data archive.
-  # The archive must contain x_test.npy, model_I2O.checkpoint and raw_sessions/ at its top level.
-  DATA_URL: '{{.DATA_URL | default "https://example.com/wearable_risk_pipeline/data.tar.gz"}}'
+  # Input data, Zenodo record https://doi.org/10.5281/zenodo.23344939
+  # (model_I2O.checkpoint is tracked in git and not downloaded).
+  RAW_SESSIONS_URL: '{{.RAW_SESSIONS_URL | default "https://zenodo.org/records/23344939/files/raw_sessions_final.zip?download=1"}}'
+  X_TEST_URL: '{{.X_TEST_URL | default "https://zenodo.org/records/23344939/files/x_test.zip?download=1"}}'
 
 tasks:
   setup:
-    desc: Download and extract the input data into ./data
+    desc: Download and extract the input data (raw_sessions/, x_test.npy) into ./data
+    preconditions:
+      - sh: command -v unzip
+        msg: "unzip is required -- install it first (e.g. sudo apt install unzip)"
     cmds:
       - mkdir -p data
-      - curl -fL --progress-bar -o data/data.tar.gz "{{.DATA_URL}}"
-      - tar -xzf data/data.tar.gz -C data
-      - rm data/data.tar.gz
+      - curl -fL --progress-bar -o data/raw_sessions_final.zip "{{.RAW_SESSIONS_URL}}"
+      - curl -fL --progress-bar -o data/x_test.zip "{{.X_TEST_URL}}"
+      - unzip -q -o data/raw_sessions_final.zip -d data
+      - unzip -q -o data/x_test.zip -d data
+      - rm data/raw_sessions_final.zip data/x_test.zip
     status:
       - test -f data/x_test.npy
-      - test -f data/model_I2O.checkpoint
       - test -d data/raw_sessions
 
   build:
@@ -29,8 +34,10 @@ tasks:
     desc: Build the image and run the full pipeline (extra flags go after --, e.g. task up -- --draws 20)
     deps: [build]
     preconditions:
-      - sh: test -f data/x_test.npy
+      - sh: test -f data/x_test.npy && test -d data/raw_sessions
         msg: "data/ is missing -- run `task setup` first"
+      - sh: test -f data/model_I2O.checkpoint
+        msg: "data/model_I2O.checkpoint is missing -- it is tracked in git, restore it with `git checkout -- data/model_I2O.checkpoint`"
     cmds:
       - mkdir -p output
       - docker rm -f {{.CONTAINER}} >/dev/null 2>&1 || true
