@@ -10,15 +10,47 @@ The pipeline:
 4. Runs a pretrained LSTM surrogate with and without the error, in a Monte Carlo loop.
 5. Reports per-subject changes in years-to-onset and risk-class flips.
 
-It is self-contained. Everything it reads is under `data/`, and nothing is read from the original `PRAESIIDIUM/` or `che_fatica_praes/` directories.
-
 ---
 
-## Quick start
+## Quick start (Docker + Task)
+
+Requires [Docker](https://docs.docker.com/get-docker/) and [Task](https://taskfile.dev/installation/).
+
+```bash
+task setup    # download and extract the input data into ./data (skipped if already there)
+task up       # build the image and run the full pipeline; results land in ./output
+task down     # stop and remove the container
+```
+
+| Task | What it does |
+|---|---|
+| `task setup` | Downloads `DATA_URL` with `curl`, extracts it into `data/`, deletes the archive. It is skipped when `data/x_test.npy`, `data/model_I2O.checkpoint` and `data/raw_sessions/` already exist |
+| `task up` | Runs `task build`, then starts the container `wearable-risk-pipeline` in the background and follows its logs. `data/` is mounted read-only and `output/` read-write. The container runs as your user, so output files are not owned by root |
+| `task down` | Removes the container (stopping it first if it is still running) |
+| `task build` | Builds only the image `wearable-risk-pipeline` |
+
+`DATA_URL` in `Taskfile.yml` is a placeholder (`https://example.com/...`). Set it to the real location of a `.tar.gz` that contains `x_test.npy`, `model_I2O.checkpoint` and `raw_sessions/` at its top level. You can also override it per call:
+
+```bash
+task setup DATA_URL=https://my-server/data.tar.gz
+```
+
+Pipeline flags (see below) go after `--`:
+
+```bash
+task up -- --devices garmin --draws 20
+```
+
+Pressing Ctrl-C during `task up` stops following the logs, but the container keeps running. Use `docker logs -f wearable-risk-pipeline` to reattach, or `task down` to stop it.
+
+The image (`Dockerfile`) is based on `python:3.13-slim`. It installs the pinned versions in `requirements.txt` (CPU-only torch) and contains only the code. Data and results always stay on the host.
+
+## Running without Docker
 
 ```bash
 # from the project root
-source .venv/bin/activate          # Python 3.13, deps already installed
+python -m venv .venv && source .venv/bin/activate
+pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
 python run.py                      # both devices, 100 draws, seed 7
 ```
 
@@ -44,14 +76,7 @@ Inference runs on the CPU. Each device builds 20,000 error combinations once, th
 
 ### Dependencies
 
-To set up a fresh environment instead of the bundled `.venv`:
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install numpy pandas scipy matplotlib torch joblib scikit-learn
-```
-
-Versions in the bundled `.venv`: numpy 2.5, pandas 3.0, scipy 1.18, matplotlib 3.11, torch 2.14, joblib 1.5, scikit-learn 1.7. The checkpoint's scalers were pickled with an older scikit-learn. The resulting version warning is suppressed in `pipeline/model.py`.
+`requirements.txt` pins numpy 2.5.3, pandas 3.0.5, scipy 1.18.1, matplotlib 3.11.2, torch 2.14.0, joblib 1.5.2 and scikit-learn 1.7.2. The checkpoint's scalers were pickled with an older scikit-learn. The resulting version warning is suppressed in `pipeline/model.py`.
 
 ---
 
@@ -68,7 +93,10 @@ wearable_risk_pipeline/
 │   ├── analysis.py        # steps 8-9: Monte Carlo loop, per-draw confusion matrices
 │   ├── plots.py           # figures (error pool, confusion matrices, ref-vs-perturbed violins)
 │   └── report.py          # step 10: summary CSVs, paper tables, RESULTS.md
-├── data/                  # inputs (≈1.2 GB, see below)
+├── Dockerfile             # image that runs run.py (code only; data/output mounted)
+├── Taskfile.yml           # task setup / up / down / build
+├── requirements.txt       # pinned Python dependencies
+├── data/                  # inputs (≈1.2 GB, see below; fetched by `task setup`)
 └── output/                # generated results (overwritten on each run)
 ```
 
@@ -122,7 +150,7 @@ There are 1,416 files in total. Fields:
 | `associated_fitbit` / `associated_garmin` | truthy | Which wearable was worn (older export format) |
 | `associated_device_name` | str | `"FitbitFile"`, `"GarminFile"` or `"NoneType"` (newer export format) |
 
-The wearable is identified **only** through `associated_fitbit` / `associated_garmin` (see [Known issues](#known-issues)).
+The wearable is identified by `associated_fitbit` / `associated_garmin` when present (older format, 464 records), otherwise by `associated_device_name` (newer format, 901 records). Records with `"NoneType"` or no device data are skipped. After preprocessing and time-window alignment, 1,326 sessions remain in the error pool: 874 Fitbit and 452 Garmin.
 
 #### `sessions_report.csv`, `aggregated_report.csv`, `activities_summary.csv`
 
@@ -178,7 +206,7 @@ A day's error is the sum of several sessions, not a single one. So for each devi
 - Shuffle the `OTHER_INDOOR` / `OTHER_OUTDOOR` sessions and keep adding their errors until the accumulated `total_time` reaches 16 h (`HOURS_THRESHOLD_MINUTES`).
 - Add exactly one session of another activity type.
 
-This mirrors `pick_sessions_errors` in `che_fatica_praes/add_errors.py`. The result is the device's empirical error distribution (see `error_violin_<device>.png` and `error_box_<device>.png`).
+The result is the device's empirical error distribution (see `error_violin_<device>.png` and `error_box_<device>.png`).
 
 ### Step 6: perturb the records (`errors.py::perturb`)
 
@@ -271,12 +299,3 @@ All tunables are in one file:
 - Each device starts from a fresh `np.random.default_rng(seed)`. The results for one device therefore do not depend on which other devices are run.
 - `torch.manual_seed(seed)` is set as well, although inference itself is deterministic.
 - Rerunning with the same `--seed`, `--draws` and data produces identical outputs.
-
----
-
-## Known issues
-
-- **Most wearable sessions are currently skipped.** `sessions.py` identifies the device only from `associated_fitbit` / `associated_garmin`. Of the 1,416 records, 464 carry those flags (364 Fitbit, 100 Garmin). Another 901 records use the newer `associated_device_name` field (530 `FitbitFile`, 371 `GarminFile`), have wearable HR data, and are ignored. Reading `associated_device_name` as a fallback would roughly triple the error pool.
-- **Duplicate function in `pipeline/report.py`.** `_render_markdown` is defined twice (lines ~246 and ~287). The first copy contains stray code that refers to an undefined `output_dir`. It never runs because the second definition overrides it, but it should be removed.
-- `data/raw_sessions/hrdbny5/` has only `user.json` and no session records.
-- `data/raw_sessions/*/reports/aggregated/.~lock.aggregated_report.csv#` is a leftover LibreOffice lock file and can be deleted.
